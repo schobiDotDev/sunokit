@@ -1,0 +1,60 @@
+{
+  "name": "sunokit",
+  "version": "1.0.0",
+  "description": "CLI & library for Suno.com music generation via browser automation",
+  "main": "dist/lib.js",
+  "types": "dist/lib.d.ts",
+  "bin": {
+    "sunokit": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js",
+      "require": "./dist/lib.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:smoke": "vitest run --config vitest.smoke.config.ts",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "link": "npm run build && npm link",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schobiDotDev/sunokit.git"
+  },
+  "keywords": [
+    "suno",
+    "music",
+    "ai",
+    "cli",
+    "music-generation",
+    "browser-automation",
+    "text-to-music",
+    "audio"
+  ],
+  "author": "schobiDotDev",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/schobiDotDev/sunokit/issues"
+  },
+  "homepage": "https://github.com/schobiDotDev/sunokit#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "rebrowser-puppeteer-core": "^24.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.18"
+  }
+}
