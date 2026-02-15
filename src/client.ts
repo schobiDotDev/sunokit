@@ -989,41 +989,68 @@ export class SunoClient {
   private async waitForGeneration(
     initialSongIds: Set<string>,
     titleOrTimeout?: string | number,
-    timeout: number = 180000
+    timeout: number = 300000
   ): Promise<Song[]> {
     const title = typeof titleOrTimeout === 'string' ? titleOrTimeout : 'Generated Song';
     const actualTimeout = typeof titleOrTimeout === 'number' ? titleOrTimeout : timeout;
 
+    const page = this.getPage();
     const startTime = Date.now();
-    console.log('⏳ Waiting for generation (1-2 minutes)...');
+    console.log('⏳ Waiting for generation (up to 5 minutes)...');
 
-    let lastNewCount = 0;
-    let stableCount = 0;
+    let detected = false;
     let checkCount = 0;
 
     while (Date.now() - startTime < actualTimeout) {
-      await this.delay(5000);
+      await this.delay(10000);
       checkCount++;
       process.stdout.write('.');
 
-      const currentIds = await this.getSongIds();
-      const newIds = [...currentIds].filter(id => !initialSongIds.has(id));
+      // Check for new songs that have a visible duration (= finished rendering)
+      // Duration text is in the parent container, not the <a> tag itself
+      const completedNewIds = await page.evaluate((knownIds: string[]) => {
+        const known = new Set(knownIds);
+        const completed: string[] = [];
 
-      // New songs appeared and count is stable for 2 consecutive checks
-      if (newIds.length >= 1) {
-        if (newIds.length === lastNewCount) {
-          stableCount++;
-        } else {
-          stableCount = 0;
-        }
+        const songLinks = document.querySelectorAll('a[href*="/song/"]');
+        for (const link of Array.from(songLinks)) {
+          const href = link.getAttribute('href') || '';
+          const match = href.match(/\/song\/([a-f0-9-]+)/);
+          if (!match) continue;
 
-        if (stableCount >= 2) {
-          console.log(`\n✅ Generated ${newIds.length} song(s)!`);
-          return this.buildSongResults(newIds, title);
+          const id = match[1];
+          if (known.has(id)) continue;
+
+          // Walk up to find the song card container (duration is ~5 levels up)
+          let container: HTMLElement | null = link as HTMLElement;
+          for (let i = 0; i < 6; i++) {
+            if (container.parentElement) container = container.parentElement;
+          }
+          const containerText = container?.textContent || '';
+          const hasDuration = /\d+:\d{2}/.test(containerText);
+          if (hasDuration) {
+            completed.push(id);
+          }
         }
+        return completed;
+      }, [...initialSongIds]);
+
+      if (completedNewIds.length >= 1 && !detected) {
+        detected = true;
+        console.log(`\n   🎵 ${completedNewIds.length} song(s) finished rendering...`);
       }
 
-      lastNewCount = newIds.length;
+      // Wait for at least 2 completed songs (Suno generates pairs) or stable for 2 checks
+      if (completedNewIds.length >= 2) {
+        console.log(`✅ Generated ${completedNewIds.length} song(s)!`);
+        return this.buildSongResults(completedNewIds, title);
+      }
+
+      // If we've been waiting a while and have at least 1, accept it
+      if (completedNewIds.length >= 1 && Date.now() - startTime > 180000) {
+        console.log(`✅ Generated ${completedNewIds.length} song(s)!`);
+        return this.buildSongResults(completedNewIds, title);
+      }
     }
 
     console.log(`\n❌ Timeout after ${checkCount} checks`);
