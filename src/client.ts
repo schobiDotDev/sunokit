@@ -32,11 +32,11 @@ export class SunoClient {
     if (!page) throw new Error('Backend did not provide a page');
     
     console.log('📡 Navigating to Suno...');
-    await page.goto('https://suno.com/create', { 
+    await page.goto('https://suno.com/create', {
       waitUntil: 'domcontentloaded',
-      timeout: 60000 
+      timeout: 60000
     });
-    await this.delay(3000);
+    await this.waitForPageReady();
     await this.ensureLoggedIn();
   }
 
@@ -66,7 +66,7 @@ export class SunoClient {
       waitUntil: 'domcontentloaded',
       timeout: 60000
     });
-    await this.delay(3000);
+    await this.waitForPageReady();
 
     // Select model version (if not default v5)
     if (opts.model && opts.model !== 'v5') {
@@ -123,11 +123,11 @@ export class SunoClient {
   async generateSample(options: SampleOptions): Promise<Song[]> {
     const page = this.getPage();
 
-    await page.goto('https://suno.com/create', { 
+    await page.goto('https://suno.com/create', {
       waitUntil: 'domcontentloaded',
-      timeout: 60000 
+      timeout: 60000
     });
-    await this.delay(3000);
+    await this.waitForPageReady();
 
     console.log('🔊 Switching to Sample mode...');
     
@@ -138,13 +138,13 @@ export class SunoClient {
     // Fill the sound description
     console.log(`📝 Filling sound description: "${options.prompt.substring(0, 50)}..."`);
     await this.fillTextareaByPlaceholder('Describe the sound', options.prompt);
-    await this.delay(300);
+    await this.delay(800);
 
     // Open Advanced Options for type, BPM, key settings
     const needsAdvanced = options.type !== 'one-shot' || options.bpm || options.key;
     if (needsAdvanced) {
       await this.expandSection('Advanced Options');
-      await this.delay(500);
+      await this.delay(1000);
     }
 
     // Set sample type
@@ -156,21 +156,21 @@ export class SunoClient {
         'effect': 'Effect'
       };
       await this.clickButtonByText(typeMap[options.type]);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // Set BPM (for loops)
     if (options.bpm) {
       console.log(`   • Setting BPM: ${options.bpm}...`);
       await this.fillNumberInput('BPM', options.bpm);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // Set Key
     if (options.key) {
       console.log(`   • Setting key: ${options.key}...`);
       await this.fillInputByPlaceholder('Auto', options.key);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     const initialSongs = await this.getSongIds();
@@ -258,11 +258,11 @@ export class SunoClient {
   async listSongs(limit: number = 20): Promise<Song[]> {
     const page = this.getPage();
 
-    await page.goto('https://suno.com/create', { 
+    await page.goto('https://suno.com/create', {
       waitUntil: 'domcontentloaded',
-      timeout: 60000 
+      timeout: 60000
     });
-    await this.delay(3000);
+    await this.waitForPageReady();
 
     const songs: Song[] = [];
     const songLinks = await page.$$('a[href*="/song/"]');
@@ -485,6 +485,52 @@ export class SunoClient {
   }
 
   /**
+   * Wait until the Suno create page is fully loaded, interactive, AND stable.
+   * Suno's SPA often reloads 1-2 times after initial navigation (auth checks,
+   * session restoration, etc.). This method waits for the page to be
+   * continuously ready for STABLE_DURATION ms before returning.
+   */
+  private async waitForPageReady(timeout: number = 25000): Promise<void> {
+    const page = this.getPage();
+    const start = Date.now();
+    let stableStart: number | null = null;
+    const STABLE_DURATION = 3000; // Must be ready for 3 continuous seconds
+
+    console.log('   ⏳ Waiting for page to stabilize...');
+
+    while (Date.now() - start < timeout) {
+      let ready = false;
+      try {
+        ready = await page.evaluate(() => {
+          const hasCreateBtn = !!Array.from(document.querySelectorAll('button'))
+            .find(b => b.textContent?.includes('Create'));
+          const hasTextarea = !!document.querySelector('textarea');
+          return hasCreateBtn || hasTextarea;
+        });
+      } catch {
+        // page.evaluate can fail if page is mid-navigation
+        ready = false;
+      }
+
+      if (ready) {
+        if (!stableStart) stableStart = Date.now();
+        if (Date.now() - stableStart >= STABLE_DURATION) {
+          console.log('   ✓ Page is stable and ready');
+          return;
+        }
+      } else {
+        if (stableStart) {
+          console.log('   ↻ Page reloaded, resetting stability check...');
+        }
+        stableStart = null;
+      }
+
+      await this.delay(500);
+    }
+    console.log('⚠️  Page may not be fully stable, proceeding anyway...');
+  }
+
+  /**
    * Find the first visible, non-captcha textarea on the page.
    * On Suno's create page this is always the main prompt/lyrics field.
    */
@@ -698,12 +744,13 @@ export class SunoClient {
       await this.clickButtonByText('Lyrics');
       await this.delay(500);
       await this.fillTextareaByPlaceholder('lyrics', options.lyrics);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     if (options.instrumental) {
       console.log('   • Setting instrumental...');
       await this.clickButtonByText('Instrumental');
+      await this.delay(800);
     }
   }
 
@@ -711,12 +758,22 @@ export class SunoClient {
     const page = this.getPage();
 
     console.log('📝 Filling custom mode options...');
-    
+
+    // 0. Fill Song Description (the main prompt field — first visible textarea)
+    console.log(`   • Setting song description: "${options.prompt.substring(0, 50)}${options.prompt.length > 50 ? '...' : ''}"`);
+    const descTextarea = await this.findFirstVisibleTextarea();
+    if (descTextarea) {
+      await descTextarea.type(options.prompt);
+    } else {
+      throw new Error('Could not find Song Description textarea in custom mode');
+    }
+    await this.delay(800);
+
     // 1. Fill Lyrics
     if (options.lyrics) {
       console.log('   • Setting lyrics...');
       await this.fillTextareaByPlaceholder('lyrics', options.lyrics);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // 2. Fill Styles (the styles textarea is the second one on the page in custom mode)
@@ -741,23 +798,23 @@ export class SunoClient {
           await visible[1].type(options.styles!);
         }
       }
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // 3. Expand Advanced Options section if needed
-    if (options.excludeStyles || options.vocalGender || 
+    if (options.excludeStyles || options.vocalGender ||
         options.weirdness !== undefined || options.styleInfluence !== undefined ||
         options.lyricsMode) {
       console.log('   • Opening Advanced Options...');
       await this.expandSection('Advanced Options');
-      await this.delay(500);
+      await this.delay(1000);
     }
 
     // 4. Fill Exclude Styles
     if (options.excludeStyles) {
       console.log('   • Setting exclude styles...');
       await this.fillInputByPlaceholder('Exclude', options.excludeStyles);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // 5. Set Vocal Gender
@@ -765,7 +822,7 @@ export class SunoClient {
       console.log(`   • Setting vocal gender: ${options.vocalGender}...`);
       const genderText = options.vocalGender === 'male' ? 'Male' : 'Female';
       await this.clickButtonByText(genderText);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // 6. Set Lyrics Mode
@@ -773,34 +830,34 @@ export class SunoClient {
       console.log(`   • Setting lyrics mode: ${options.lyricsMode}...`);
       const modeText = options.lyricsMode === 'auto' ? 'Auto' : 'Manual';
       await this.clickButtonByText(modeText);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // 7. Set Weirdness slider
     if (options.weirdness !== undefined && options.weirdness !== 50) {
       console.log(`   • Setting weirdness: ${options.weirdness}%...`);
       await this.setSliderByLabel('Weirdness', options.weirdness);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // 8. Set Style Influence slider
     if (options.styleInfluence !== undefined && options.styleInfluence !== 50) {
       console.log(`   • Setting style influence: ${options.styleInfluence}%...`);
       await this.setSliderByLabel('Style Influence', options.styleInfluence);
-      await this.delay(300);
+      await this.delay(800);
     }
 
     // 9. Set Title — auto-generate from prompt if not provided
     const title = options.title || options.prompt.substring(0, 60);
     console.log(`   • Setting title: "${title}"...`);
     await this.fillInputByPlaceholder('title', title);
-    await this.delay(300);
+    await this.delay(800);
 
     // 10. Set Instrumental if needed
     if (options.instrumental) {
       console.log('   • Setting instrumental...');
       await this.clickButtonByText('Instrumental');
-      await this.delay(300);
+      await this.delay(800);
     }
 
     console.log('   ✓ Custom mode options filled!');
@@ -910,7 +967,7 @@ export class SunoClient {
     const page = this.getPage();
     console.log('🔧 Switching to Custom mode...');
     await this.clickButtonByText('Custom');
-    await this.delay(1000);
+    await this.delay(2000);
   }
 
   private async getSongIds(): Promise<Set<string>> {
