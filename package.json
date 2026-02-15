@@ -5,7 +5,7 @@
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",
   "bin": {
-    "sunokit": "./dist/index.js"
+    "sunokit": "dist/index.js"
   },
   "exports": {
     ".": {

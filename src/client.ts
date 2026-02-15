@@ -454,6 +454,155 @@ export class SunoClient {
   }
 
   /**
+   * Download via authenticated browser session (needed for WAV format).
+   *
+   * Uses Suno's internal API directly (discovered via network inspection):
+   *   1. POST /api/gen/{id}/convert_wav/ — triggers server-side WAV conversion
+   *   2. GET  /api/gen/{id}/wav_file/    — polls until WAV is ready, streams to disk
+   *
+   * The auth token is extracted from the browser's Clerk session, then API calls
+   * are made from Node.js (bypassing CORS restrictions that block in-page fetch).
+   */
+  async downloadBrowser(
+    songId: string,
+    outputPath: string,
+    format: DownloadFormat = 'wav'
+  ): Promise<void> {
+    const page = this.getPage();
+
+    console.log(`📥 Browser download (${format}): ${songId}`);
+
+    const absOutput = path.resolve(outputPath);
+    const outputDir = path.dirname(absOutput);
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    // Ensure we're on suno.com so we can extract the auth token
+    if (!page.url().includes('suno.com')) {
+      await page.goto('https://suno.com/create', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+      await this.delay(2000);
+    }
+
+    // Extract the Clerk session token — Suno's API requires Bearer auth.
+    console.log('   • Extracting auth token...');
+    const authToken = await page.evaluate(async () => {
+      // Method 1: Clerk's getToken() via window.__clerk
+      try {
+        const clerk = (window as any).__clerk_frontend_api
+          || (window as any).Clerk
+          || (window as any).__clerk;
+        if (clerk?.session?.getToken) {
+          const token = await clerk.session.getToken();
+          if (token) return token;
+        }
+      } catch {}
+
+      // Method 2: Extract from __session cookie
+      const cookies = document.cookie.split(';');
+      for (const cookie of cookies) {
+        const [name, value] = cookie.trim().split('=');
+        if (name === '__session' && value) return value;
+      }
+
+      // Method 3: Look for token in localStorage
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.includes('clerk') && key.includes('session')) {
+          const val = localStorage.getItem(key);
+          if (val) return val;
+        }
+      }
+
+      return null;
+    });
+
+    if (!authToken) {
+      throw new Error('Could not extract auth token. Is the browser logged in to Suno?');
+    }
+    console.log('   • Auth token obtained');
+
+    const API_HOST = 'studio-api.prod.suno.com';
+
+    // 1. Trigger WAV conversion
+    console.log('   • Triggering WAV conversion...');
+    const convertRes = await this.apiRequest(API_HOST, `/api/gen/${songId}/convert_wav/`, 'POST', authToken);
+
+    if (convertRes.status !== 200 && convertRes.status !== 204) {
+      throw new Error(`WAV conversion failed: HTTP ${convertRes.status}. ${convertRes.body}`);
+    }
+    console.log('   • Conversion triggered, waiting for file...');
+
+    // 2. Poll for WAV file readiness
+    const wavPath = `/api/gen/${songId}/wav_file/`;
+    const maxWait = 60000;
+    const start = Date.now();
+    let wavFileUrl: string | null = null;
+
+    while (Date.now() - start < maxWait) {
+      const pollRes = await this.apiRequest(API_HOST, wavPath, 'GET', authToken);
+
+      if (pollRes.status === 200) {
+        // Response is JSON with the CDN URL: {"wav_file_url": "https://cdn1.suno.ai/..."}
+        try {
+          const json = JSON.parse(pollRes.body);
+          wavFileUrl = json.wav_file_url || json.url || null;
+        } catch {}
+        break;
+      }
+
+      process.stdout.write('.');
+      await this.delay(2000);
+    }
+
+    if (!wavFileUrl) {
+      throw new Error('WAV conversion timed out or no download URL returned. Try again later.');
+    }
+
+    // 3. Download the WAV file from CDN
+    console.log('\n   • Downloading WAV...');
+    await SunoClient.downloadFile(wavFileUrl, absOutput);
+
+    const stats = fs.statSync(absOutput);
+    const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+    console.log(`✅ Downloaded: ${outputPath} (${sizeMB} MB)`);
+  }
+
+  /**
+   * Make an authenticated HTTPS request to Suno's API from Node.js.
+   * Returns status code and response body.
+   */
+  private apiRequest(
+    host: string, urlPath: string, method: string, token: string
+  ): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: host,
+        path: urlPath,
+        method,
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          resolve({
+            status: res.statusCode || 0,
+            body: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  /**
    * Generate and download in one call (convenience method)
    */
   async generateAndDownload(
@@ -963,11 +1112,204 @@ export class SunoClient {
     }
   }
 
+  /**
+   * Wait for a Suno context menu to render, then click the item matching `text`.
+   * Suno renders context menus as React portals — they appear asynchronously.
+   * Items use the class `context-menu-button`.
+   */
+  private async waitAndClickContextMenuItem(text: string, timeout: number = 10000): Promise<boolean> {
+    const page = this.getPage();
+    const start = Date.now();
+
+    while (Date.now() - start < timeout) {
+      const result = await page.evaluate((searchText: string) => {
+        const items = document.querySelectorAll('button.context-menu-button');
+        const visible: string[] = [];
+        for (const item of Array.from(items)) {
+          const el = item as HTMLElement;
+          if (el.offsetWidth > 0) {
+            const itemText = (el.textContent || '').trim();
+            visible.push(itemText);
+            if (itemText.includes(searchText)) {
+              el.click();
+              return { clicked: true, items: visible };
+            }
+          }
+        }
+        return { clicked: false, items: visible };
+      }, text);
+
+      if (result.clicked) {
+        console.log(`   • Clicked "${text}" (menu had: ${result.items.join(', ')})`);
+        return true;
+      }
+
+      if (result.items.length > 0) {
+        // Menu is open but doesn't have our item
+        console.log(`   ⚠️  Menu items found: [${result.items.join(', ')}] — no "${text}"`);
+        return false;
+      }
+
+      await this.delay(500);
+    }
+    return false;
+  }
+
   private async switchToCustomMode(): Promise<void> {
     const page = this.getPage();
     console.log('🔧 Switching to Custom mode...');
     await this.clickButtonByText('Custom');
     await this.delay(2000);
+  }
+
+  /**
+   * Click the song-specific "..." context menu button on a song page.
+   *
+   * Suno has multiple buttons with aria-label="More menu contents":
+   *   - Song context menu: has data-context-menu-trigger attribute
+   *   - Profile/playbar menus: no data-context-menu-trigger
+   *
+   * The song menu button has no visible text — just a three-dot SVG icon
+   * inside a rounded pill (bg-background-tertiary, rounded-full).
+   */
+  private async clickSongMenuButton(): Promise<void> {
+    const page = this.getPage();
+    const clicked = await page.evaluate(() => {
+      // Primary: aria-label="More menu contents" + data-context-menu-trigger (song context menu)
+      const ctxBtn = document.querySelector(
+        'button[aria-label="More menu contents"][data-context-menu-trigger]'
+      ) as HTMLButtonElement | null;
+      if (ctxBtn && ctxBtn.offsetWidth > 0) {
+        ctxBtn.click();
+        return 'context-menu-trigger';
+      }
+
+      // Fallback: any button with aria-label="More menu contents"
+      const buttons = Array.from(document.querySelectorAll('button[aria-label="More menu contents"]')) as HTMLButtonElement[];
+      for (const btn of buttons) {
+        if (btn.offsetWidth > 0) {
+          btn.click();
+          return 'aria-fallback';
+        }
+      }
+
+      return null;
+    });
+
+    if (!clicked) throw new Error('Could not find song menu button ("...")');
+    console.log(`   (matched via: ${clicked})`);
+  }
+
+  /**
+   * Click the first visible interactive element containing the given text.
+   * Searches buttons, links, menu items, and role="button" elements.
+   */
+  private async clickVisibleText(text: string): Promise<boolean> {
+    const page = this.getPage();
+    return page.evaluate((searchText: string) => {
+      const selectors = 'button, a, [role="menuitem"], [role="option"], [role="button"]';
+      const elements = document.querySelectorAll(selectors);
+
+      // Prefer exact match first
+      for (const el of Array.from(elements)) {
+        const elText = (el.textContent || '').trim();
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        if (elText === searchText && rect.width > 0 && rect.height > 0) {
+          (el as HTMLElement).click();
+          return true;
+        }
+      }
+
+      // Then try contains (case-insensitive)
+      for (const el of Array.from(elements)) {
+        const elText = (el.textContent || '').trim();
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        if (elText.toLowerCase().includes(searchText.toLowerCase())
+            && rect.width > 0 && rect.height > 0) {
+          (el as HTMLElement).click();
+          return true;
+        }
+      }
+
+      return false;
+    }, text);
+  }
+
+  /**
+   * Wait until text appears anywhere on the page.
+   */
+  private async waitForVisibleText(text: string, timeout: number): Promise<boolean> {
+    const page = this.getPage();
+    const start = Date.now();
+
+    while (Date.now() - start < timeout) {
+      const found = await page.evaluate((searchText: string) => {
+        return (document.body.textContent || '').includes(searchText);
+      }, text);
+      if (found) return true;
+      await this.delay(1000);
+    }
+    return false;
+  }
+
+  /**
+   * Download a file from a URL to a local path (follows redirects).
+   */
+  static async downloadFile(url: string, outputPath: string): Promise<void> {
+    const outputDir = path.dirname(outputPath);
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    return new Promise((resolve, reject) => {
+      const file = fs.createWriteStream(outputPath);
+
+      const makeRequest = (requestUrl: string) => {
+        https.get(requestUrl, (response) => {
+          if (response.statusCode === 301 || response.statusCode === 302) {
+            const redirectUrl = response.headers.location;
+            if (redirectUrl) {
+              makeRequest(redirectUrl);
+              return;
+            }
+          }
+
+          if (response.statusCode !== 200) {
+            fs.unlink(outputPath, () => {});
+            reject(new Error(`Download failed: HTTP ${response.statusCode} for ${requestUrl}`));
+            return;
+          }
+
+          const totalBytes = parseInt(response.headers['content-length'] || '0', 10);
+          let downloadedBytes = 0;
+          let lastProgress = -1;
+
+          response.on('data', (chunk) => {
+            downloadedBytes += chunk.length;
+            if (totalBytes > 0) {
+              const progress = Math.floor((downloadedBytes / totalBytes) * 100);
+              if (progress !== lastProgress && progress % 10 === 0) {
+                process.stdout.write(`\r   Progress: ${progress}%`);
+                lastProgress = progress;
+              }
+            }
+          });
+
+          response.pipe(file);
+
+          file.on('finish', () => {
+            file.close();
+            if (totalBytes > 0) process.stdout.write('\n');
+            resolve();
+          });
+        }).on('error', (err) => {
+          fs.unlink(outputPath, () => {});
+          reject(new Error(`Download error: ${err.message}`));
+        });
+      };
+
+      makeRequest(url);
+    });
   }
 
   private async getSongIds(): Promise<Set<string>> {

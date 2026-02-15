@@ -1,0 +1,13 @@
+# Source
+src/
+tests/
+
+# Config
+tsconfig.json
+vitest.config.ts
+vitest.smoke.config.ts
+CLAUDE.md
+.claude/
+
+# Dev files
+test-type.ts

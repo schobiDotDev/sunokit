@@ -27,6 +27,15 @@ export interface BrowserPage {
     press(key: string): Promise<void>;
     up(key: string): Promise<void>;
   };
+  /** Create a Chrome DevTools Protocol session for low-level browser control */
+  createCDPSession(): Promise<CDPSession>;
+}
+
+export interface CDPSession {
+  send(method: string, params?: Record<string, any>): Promise<any>;
+  on(event: string, handler: (...args: any[]) => void): void;
+  off(event: string, handler: (...args: any[]) => void): void;
+  detach(): Promise<void>;
 }
 
 export interface BrowserElement {
@@ -121,6 +130,10 @@ class PuppeteerPageWrapper implements BrowserPage {
 
   get keyboard() {
     return this.page.keyboard;
+  }
+
+  async createCDPSession(): Promise<CDPSession> {
+    return await this.page.createCDPSession() as unknown as CDPSession;
   }
 }
 

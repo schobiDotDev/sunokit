@@ -49,10 +49,12 @@ export {
   SunoBrowser,
   BrowserPage,
   BrowserElement,
+  CDPSession,
 } from './browser';
 
 /**
- * Quick download - no browser needed
+ * Quick download — uses CDN for mp3/video, browser session for WAV
+ * (Suno's CDN doesn't serve WAV; it requires authenticated UI flow)
  */
 export async function downloadSong(
   songId: string,
@@ -60,7 +62,19 @@ export async function downloadSong(
   format: 'mp3' | 'wav' | 'video' = 'wav'
 ): Promise<void> {
   const { SunoClient } = await import('./client');
-  return SunoClient.downloadCDN(songId, outputPath, format);
+
+  if (format === 'wav') {
+    // WAV requires authenticated browser session
+    const client = new SunoClient();
+    try {
+      await client.connect({ headless: true });
+      await client.downloadBrowser(songId, outputPath, 'wav');
+    } finally {
+      await client.disconnect();
+    }
+  } else {
+    return SunoClient.downloadCDN(songId, outputPath, format);
+  }
 }
 
 /**
@@ -108,6 +122,7 @@ export async function generateSong(
     });
 
     const results: { id: string; url: string; outputPath?: string }[] = [];
+    const downloadFormat = options.format || 'wav';
 
     for (let i = 0; i < songs.length; i++) {
       const song = songs[i];
@@ -117,7 +132,13 @@ export async function generateSong(
         outputPath = songs.length > 1
           ? options.output.replace(/(\.\w+)$/, `-${i + 1}$1`)
           : options.output;
-        await SunoClient.downloadCDN(song.id, outputPath, options.format || 'wav', { quiet: true });
+
+        if (downloadFormat === 'wav') {
+          // WAV requires authenticated browser session (CDN returns 403 for wav)
+          await client.downloadBrowser(song.id, outputPath, 'wav');
+        } else {
+          await SunoClient.downloadCDN(song.id, outputPath, downloadFormat, { quiet: true });
+        }
       }
 
       results.push({ id: song.id, url: song.url, outputPath });
@@ -156,6 +177,7 @@ export async function generateSample(
     });
 
     const results: { id: string; url: string; outputPath?: string }[] = [];
+    const downloadFormat = options.format || 'wav';
 
     for (let i = 0; i < songs.length; i++) {
       const song = songs[i];
@@ -165,7 +187,12 @@ export async function generateSample(
         outputPath = songs.length > 1
           ? options.output.replace(/(\.\w+)$/, `-${i + 1}$1`)
           : options.output;
-        await SunoClient.downloadCDN(song.id, outputPath, options.format || 'wav', { quiet: true });
+
+        if (downloadFormat === 'wav') {
+          await client.downloadBrowser(song.id, outputPath, 'wav');
+        } else {
+          await SunoClient.downloadCDN(song.id, outputPath, downloadFormat, { quiet: true });
+        }
       }
 
       results.push({ id: song.id, url: song.url, outputPath });
